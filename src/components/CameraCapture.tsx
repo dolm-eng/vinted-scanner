@@ -94,7 +94,6 @@ export default function CameraCapture({
         ref={fileInputRef}
         type="file"
         accept="image/*"
-        capture="environment"
         onChange={handleFile}
         className="hidden"
       />
@@ -105,7 +104,7 @@ export default function CameraCapture({
           onClick={() => fileInputRef.current?.click()}
           className="rounded-sm border border-paper/40 px-3 py-2 text-xs font-medium text-paper"
         >
-          Choisir une photo
+          Depuis ta galerie
         </button>
 
         {!cameraError && (

@@ -1,5 +1,14 @@
-const CACHE_NAME = "griffe-v1";
-const APP_SHELL = ["/", "/scan", "/inventory", "/manifest.webmanifest"];
+const CACHE_NAME = "griffe-v2";
+const APP_SHELL = [
+  "/",
+  "/scan",
+  "/inventory",
+  "/compta",
+  "/taches",
+  "/niches",
+  "/plus",
+  "/manifest.webmanifest",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -19,8 +28,8 @@ self.addEventListener("activate", (event) => {
   self.clients.claim();
 });
 
-// Network-first for navigations (so the person always gets fresh app code when
-// online), falling back to cache when offline. Cache-first for static assets.
+// Network-first for navigations (fresh app code when online, cache when offline).
+// Cache-first for static assets (Next hashes their filenames).
 self.addEventListener("fetch", (event) => {
   const { request } = event;
   if (request.method !== "GET") return;

@@ -2,22 +2,34 @@
 
 import Link from "next/link";
 import { useLiveQuery } from "dexie-react-hooks";
-import { db, type Item } from "@/lib/db";
+import { db } from "@/lib/db";
+import { eur, formatDateFR, todayISO } from "@/lib/dates";
+import { computeBilan } from "@/lib/finance";
+import { DEFAULT_URSSAF_RATE, useSetting } from "@/lib/settings";
 import TagCard from "@/components/TagCard";
+import { Stat } from "@/components/ui";
 
 export default function Home() {
   const items = useLiveQuery(() =>
     db.items.orderBy("createdAt").reverse().toArray()
   );
+  const expenses = useLiveQuery(() => db.expenses.toArray());
+  const tasks = useLiveQuery(() => db.tasks.toArray());
+  const [rate] = useSetting<number>("urssafRate", DEFAULT_URSSAF_RATE);
+  const [goal] = useSetting<number>("monthlyGoal", 0);
 
-  const stats = useStats(items);
+  const bilan = computeBilan(items ?? [], expenses ?? [], "mois", rate);
+  const today = todayISO();
+  const dueTasks = (tasks ?? [])
+    .filter((t) => !t.done && t.dueDate && t.dueDate <= today)
+    .sort((a, b) => (a.dueDate! < b.dueDate! ? -1 : 1));
+
+  const progress = goal > 0 ? Math.max(0, Math.min(1, bilan.net / goal)) : 0;
 
   return (
     <main className="mx-auto max-w-md px-4 pt-6">
       <header className="flex items-baseline justify-between">
-        <h1 className="font-display text-2xl font-bold tracking-tight">
-          Griffe
-        </h1>
+        <h1 className="font-display text-2xl font-bold tracking-tight">Griffe</h1>
         <span className="text-xs text-ink/55">
           {new Date().toLocaleDateString("fr-FR", {
             weekday: "short",
@@ -29,37 +41,81 @@ export default function Home() {
 
       <Link
         href="/scan"
-        className="mt-5 flex items-center justify-between rounded-sm bg-chalk-red px-5 py-4 text-paper shadow-sm active:scale-[0.99] transition-transform"
+        className="mt-5 flex items-center justify-between rounded-sm bg-chalk-red px-5 py-4 text-paper shadow-sm transition-transform active:scale-[0.99]"
       >
-        <span className="font-display text-lg font-bold">
-          Scanner un article
-        </span>
-        <span aria-hidden className="text-2xl leading-none">
-          +
-        </span>
+        <span className="font-display text-lg font-bold">Scanner un article</span>
+        <span aria-hidden className="text-2xl leading-none">+</span>
       </Link>
 
-      <section
-        aria-label="Résumé de ton activité"
-        className="mt-5 grid grid-cols-2 gap-2.5"
-      >
-        <StatChip label="En attente" value={stats.enAttente} />
-        <StatChip label="Publiés" value={stats.publie} />
-        <StatChip label="Vendus (total)" value={stats.vendu} />
-        <StatChip
-          label="Marge réalisée"
-          value={`${stats.margeTotale >= 0 ? "" : "−"}${Math.abs(
-            stats.margeTotale
-          )} €`}
-          accent
-        />
+      <section aria-label="Ce mois-ci" className="mt-5">
+        <p className="text-sm font-medium text-ink/70">Ce mois-ci</p>
+        <div className="mt-2 grid grid-cols-2 gap-2.5">
+          <Stat label="Chiffre d'affaires" value={eur(bilan.revenue)} />
+          <Stat
+            label="Bénéfice net"
+            value={eur(bilan.net)}
+            tone={bilan.net >= 0 ? "good" : "bad"}
+          />
+          <Stat
+            label="En stock"
+            value={`${bilan.stockCount}`}
+            hint={`${eur(bilan.stockValue)} d'achat`}
+          />
+          <Stat label="Ventes" value={`${bilan.soldCount}`} />
+        </div>
+
+        {goal > 0 && (
+          <div className="mt-3">
+            <div className="flex justify-between text-xs text-ink/60">
+              <span>Objectif du mois</span>
+              <span className="tabular-nums">
+                {eur(Math.max(0, bilan.net))} / {eur(goal)}
+              </span>
+            </div>
+            <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-line">
+              <div
+                className="h-full rounded-full bg-sage"
+                style={{ width: `${progress * 100}%` }}
+              />
+            </div>
+          </div>
+        )}
+        {goal === 0 && (
+          <Link href="/plus" className="mt-3 block text-xs text-chalk-red">
+            Fixe un objectif de bénéfice mensuel
+          </Link>
+        )}
       </section>
+
+      {dueTasks.length > 0 && (
+        <section className="mt-6">
+          <div className="flex items-baseline justify-between">
+            <h2 className="font-display text-base font-bold">À faire</h2>
+            <Link href="/taches" className="text-sm text-chalk-red">
+              Tout voir
+            </Link>
+          </div>
+          <ul className="mt-2 flex flex-col divide-y divide-line border-y border-line">
+            {dueTasks.slice(0, 3).map((t) => (
+              <li key={t.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
+                <span className="truncate">{t.title}</span>
+                <span
+                  className={`flex-none text-xs ${
+                    t.dueDate! < today ? "text-chalk-red" : "text-ink/50"
+                  }`}
+                >
+                  {t.dueDate! < today ? "En retard" : "Aujourd'hui"}
+                  {t.dueDate! < today && ` · ${formatDateFR(t.dueDate!)}`}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className="mt-7">
         <div className="flex items-baseline justify-between">
-          <h2 className="font-display text-base font-bold">
-            Articles récents
-          </h2>
+          <h2 className="font-display text-base font-bold">Articles récents</h2>
           {items && items.length > 0 && (
             <Link href="/inventory" className="text-sm text-chalk-red">
               Tout voir
@@ -73,8 +129,8 @@ export default function Home() {
           )}
           {items && items.length === 0 && (
             <div className="rounded-sm border border-dashed border-line px-4 py-6 text-center text-sm text-ink/60">
-              Rien scanné pour l&apos;instant. Ton prochain article de
-              brocante commence ici.
+              Rien scanné pour l&apos;instant. Ton prochain article de brocante
+              commence ici.
             </div>
           )}
           {items?.slice(0, 5).map((item) => (
@@ -84,39 +140,4 @@ export default function Home() {
       </section>
     </main>
   );
-}
-
-function StatChip({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: number | string;
-  accent?: boolean;
-}) {
-  return (
-    <div className="ticket-notch rounded-sm border border-line bg-paper-dim/60 px-3.5 py-3">
-      <p
-        className={`font-display text-xl font-bold tabular-nums ${
-          accent ? "text-chalk-red" : ""
-        }`}
-      >
-        {value}
-      </p>
-      <p className="mt-0.5 text-xs text-ink/60">{label}</p>
-    </div>
-  );
-}
-
-function useStats(items: Item[] | undefined) {
-  const list = items ?? [];
-  const enAttente = list.filter((i) => i.status === "en_attente").length;
-  const publie = list.filter((i) => i.status === "publie").length;
-  const vendus = list.filter((i) => i.status === "vendu");
-  const margeTotale = vendus.reduce(
-    (sum, i) => sum + ((i.soldPrice ?? 0) - i.purchasePrice),
-    0
-  );
-  return { enAttente, publie, vendu: vendus.length, margeTotale };
 }

@@ -1,31 +1,32 @@
 import Link from "next/link";
 import type { Item } from "@/lib/db";
-
-const STATUS_STYLE: Record<Item["status"], { label: string; dot: string }> = {
-  en_attente: { label: "En attente", dot: "bg-brass" },
-  publie: { label: "Publié", dot: "bg-ink" },
-  vendu: { label: "Vendu", dot: "bg-sage" },
-};
+import { itemNet } from "@/lib/finance";
+import { statusMeta } from "@/lib/status";
 
 export default function TagCard({ item }: { item: Item }) {
-  const status = STATUS_STYLE[item.status];
-  const margin =
-    item.soldPrice != null ? item.soldPrice - item.purchasePrice : null;
+  const status = statusMeta(item.status);
+  const net = itemNet(item);
+  const cover = item.photos[0];
 
   return (
     <Link
       href={`/item/${item.id}`}
-      className="ticket-notch flex gap-3 items-center border border-line bg-paper-dim/60 px-4 py-3 rounded-sm"
+      className="ticket-notch flex items-center gap-3 rounded-sm border border-line bg-paper-dim/60 px-4 py-3"
     >
       <div className="relative h-16 w-16 flex-none overflow-hidden rounded-sm border border-line bg-paper">
-        {item.photo ? (
+        {cover ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
-            src={item.photo}
+            src={cover}
             alt={item.title || "Article"}
             className="h-full w-full object-cover"
           />
         ) : null}
+        {item.photos.length > 1 && (
+          <span className="absolute bottom-0.5 right-0.5 rounded-sm bg-ink/75 px-1 text-[10px] text-paper">
+            {item.photos.length}
+          </span>
+        )}
       </div>
 
       <div className="min-w-0 flex-1">
@@ -34,6 +35,7 @@ export default function TagCard({ item }: { item: Item }) {
         </p>
         <p className="mt-0.5 truncate text-sm text-ink/60">
           {item.brand || "Sans marque"} · {item.size || "Taille ?"}
+          {item.sku ? ` · ${item.sku}` : ""}
         </p>
         <div className="mt-1.5 flex items-center gap-1.5 text-xs">
           <span className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
@@ -45,16 +47,18 @@ export default function TagCard({ item }: { item: Item }) {
         <p className="font-display text-lg font-bold tabular-nums">
           {item.soldPrice != null
             ? `${item.soldPrice} €`
-            : `${item.estimateLow}–${item.estimateHigh} €`}
+            : item.listedPrice != null
+              ? `${item.listedPrice} €`
+              : `${item.estimateLow}–${item.estimateHigh} €`}
         </p>
-        {margin != null && (
+        {net != null && (
           <p
             className={`text-xs font-medium ${
-              margin >= 0 ? "text-sage" : "text-chalk-red"
+              net >= 0 ? "text-sage" : "text-chalk-red"
             }`}
           >
-            {margin >= 0 ? "+" : ""}
-            {margin} €
+            {net >= 0 ? "+" : ""}
+            {Math.round(net * 100) / 100} €
           </p>
         )}
       </div>

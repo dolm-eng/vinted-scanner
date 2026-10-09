@@ -1,17 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { downscale, readFileAsDataURL } from "@/lib/photo";
 
 export default function CameraCapture({
   onCapture,
 }: {
-  onCapture: (dataUrl: string) => void;
+  onCapture: (dataUrls: string[]) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraError, setCameraError] = useState(false);
+  const [loadingFiles, setLoadingFiles] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -45,24 +47,32 @@ export default function CameraCapture({
     };
   }, []);
 
-  function capture() {
+  async function capture() {
     const video = videoRef.current;
-    if (!video) return;
+    if (!video || !video.videoWidth) return;
     const canvas = document.createElement("canvas");
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    onCapture(canvas.toDataURL("image/jpeg", 0.85));
+    const small = await downscale(canvas.toDataURL("image/jpeg", 0.92));
+    onCapture([small]);
   }
 
-  function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => onCapture(reader.result as string);
-    reader.readAsDataURL(file);
+  async function handleFiles(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = "";
+    if (files.length === 0) return;
+    setLoadingFiles(true);
+    try {
+      const urls = await Promise.all(
+        files.map(async (f) => downscale(await readFileAsDataURL(f)))
+      );
+      onCapture(urls);
+    } finally {
+      setLoadingFiles(false);
+    }
   }
 
   return (
@@ -79,7 +89,7 @@ export default function CameraCapture({
       {cameraError && (
         <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-paper">
           <p className="text-sm text-paper/80">
-            Caméra indisponible ici. Choisis une photo à la place.
+            Caméra indisponible ici. Choisis tes photos dans la galerie.
           </p>
         </div>
       )}
@@ -90,11 +100,18 @@ export default function CameraCapture({
         </div>
       )}
 
+      {loadingFiles && (
+        <div className="absolute inset-0 flex items-center justify-center bg-ink/70 text-sm text-paper">
+          Import des photos…
+        </div>
+      )}
+
       <input
         ref={fileInputRef}
         type="file"
         accept="image/*"
-        onChange={handleFile}
+        multiple
+        onChange={handleFiles}
         className="hidden"
       />
 
@@ -102,7 +119,7 @@ export default function CameraCapture({
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
-          className="rounded-sm border border-paper/40 px-3 py-2 text-xs font-medium text-paper"
+          className="rounded-sm border border-paper/40 bg-ink/40 px-3 py-2 text-xs font-medium text-paper"
         >
           Depuis ta galerie
         </button>

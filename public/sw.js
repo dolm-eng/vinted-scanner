@@ -1,4 +1,4 @@
-const CACHE_NAME = "griffe-v2";
+const CACHE_NAME = "griffe-v3";
 const APP_SHELL = [
   "/",
   "/scan",
@@ -36,6 +36,8 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
+  // Modèle IA volumineux : laissé au cache HTTP du navigateur.
+  if (url.pathname.startsWith("/imgly/")) return;
 
   if (request.mode === "navigate") {
     event.respondWith(

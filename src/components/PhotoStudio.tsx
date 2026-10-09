@@ -68,7 +68,7 @@ export default function PhotoStudio({
           />
           {busy && (
             <div className="absolute inset-x-0 bottom-0 bg-ink/70 px-3 py-1.5 text-center text-xs text-paper">
-              Traitement…
+              Traitement… (la 1re fois, ça peut prendre 20 à 40 s)
             </div>
           )}
         </div>

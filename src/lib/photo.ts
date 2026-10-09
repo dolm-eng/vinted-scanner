@@ -1,4 +1,4 @@
-// Studio photo 100 % local : aucune image ne quitte le téléphone.
+// Studio photo 100 % local : aucune image ne quitte le téléphone. Détourage par IA (modèle hébergé avec l’appli), avec repli sur une détection de fond uni.
 // Principe : on estime la couleur du fond à partir des bords de la photo, on isole
 // l'article (tout ce qui est connecté aux bords et proche de cette couleur = fond),
 // puis on corrige la lumière, on recadre et on remplace le fond.
@@ -20,6 +20,87 @@ export interface EnhanceOptions {
   bg: BgStyle;
   crop: boolean;
   levels: boolean;
+}
+
+// Détourage par IA (modèle ONNX hébergé avec l'appli, exécuté sur le téléphone).
+// Résultat mis en cache par photo : changer de fond ne relance pas le calcul.
+const aiCache = new Map<string, Promise<HTMLImageElement | null>>();
+
+function aiCutout(src: string): Promise<HTMLImageElement | null> {
+  let p = aiCache.get(src);
+  if (!p) {
+    p = (async () => {
+      try {
+        const { removeBackground } = await import("@imgly/background-removal");
+        const blob = await removeBackground(src, {
+          publicPath: `${window.location.origin}/imgly/`,
+          model: "small",
+          output: { format: "image/png" },
+        });
+        const url = URL.createObjectURL(blob);
+        try {
+          return await loadImage(url);
+        } finally {
+          // l'image est déjà décodée une fois onload passé
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+        }
+      } catch (e) {
+        console.warn("Détourage IA indisponible", e);
+        aiCache.delete(src);
+        return null;
+      }
+    })();
+    aiCache.set(src, p);
+  }
+  return p;
+}
+
+/** Transforme la sortie de l'IA (PNG transparent) en masque de la même forme que computeMask. */
+function maskFromCutout(
+  cutout: HTMLImageElement,
+  W: number,
+  H: number,
+  sw: number,
+  sh: number
+): { mask: Mask; maskCanvas: HTMLCanvasElement } | null {
+  const full = makeCanvas(W, H);
+  full.ctx.drawImage(cutout, 0, 0, W, H);
+  const fd = full.ctx.getImageData(0, 0, W, H);
+  // Masque plein format : blanc + alpha de l'IA (bords doux conservés).
+  for (let i = 0; i < fd.data.length; i += 4) {
+    fd.data[i] = 255;
+    fd.data[i + 1] = 255;
+    fd.data[i + 2] = 255;
+  }
+  full.ctx.putImageData(fd, 0, 0);
+
+  const small = makeCanvas(sw, sh);
+  small.ctx.drawImage(full.canvas, 0, 0, sw, sh);
+  const sd = small.ctx.getImageData(0, 0, sw, sh).data;
+  const data = new Uint8Array(sw * sh);
+  let count = 0;
+  let x0 = sw;
+  let y0 = sh;
+  let x1 = -1;
+  let y1 = -1;
+  for (let y = 0; y < sh; y++) {
+    for (let x = 0; x < sw; x++) {
+      if (sd[(y * sw + x) * 4 + 3] > 128) {
+        data[y * sw + x] = 1;
+        count++;
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+    }
+  }
+  const fraction = count / (sw * sh);
+  if (fraction < 0.02 || x1 < 0) return null;
+  return {
+    mask: { data, w: sw, h: sh, bbox: { x0, y0, x1, y1 }, fraction },
+    maskCanvas: full.canvas,
+  };
 }
 
 export interface EnhanceResult {
@@ -447,7 +528,18 @@ export async function enhance(
   const smallData = small.ctx.getImageData(0, 0, sw, sh).data;
 
   const needsMask = opts.bg !== "original" || opts.crop;
-  const mask = needsMask ? computeMask(smallData, sw, sh) : null;
+  let mask: Mask | null = null;
+  let aiMaskCanvas: HTMLCanvasElement | null = null;
+  if (needsMask) {
+    const cutout = await aiCutout(src);
+    const ai = cutout ? maskFromCutout(cutout, W, H, sw, sh) : null;
+    if (ai) {
+      mask = ai.mask;
+      aiMaskCanvas = ai.maskCanvas;
+    } else {
+      mask = computeMask(smallData, sw, sh);
+    }
+  }
 
   if (opts.levels) {
     applyLevels(base.ctx, W, H, smallData, mask);
@@ -489,7 +581,7 @@ export async function enhance(
   }
 
   // Détourage : photo ∩ masque agrandi.
-  const maskCanvas = maskToCanvas(mask);
+  const maskCanvas = aiMaskCanvas ?? maskToCanvas(mask);
   const cut = makeCanvas(W, H);
   cut.ctx.drawImage(base.canvas, 0, 0);
   cut.ctx.globalCompositeOperation = "destination-in";

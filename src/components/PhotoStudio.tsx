@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { BG_STYLES, enhance, type BgStyle, type EnhanceResult } from "@/lib/photo";
+import { BG_STYLES, DEFAULT_BG, enhance, type BgStyle, type EnhanceResult } from "@/lib/photo";
 import { Chip } from "./ui";
 
 export default function PhotoStudio({
@@ -15,7 +15,7 @@ export default function PhotoStudio({
   onSave: (dataUrl: string, mode: "replace" | "add") => void;
   onClose: () => void;
 }) {
-  const [bg, setBg] = useState<BgStyle>("blanc");
+  const [bg, setBg] = useState<BgStyle>(DEFAULT_BG);
   const [crop, setCrop] = useState(true);
   const [levels, setLevels] = useState(true);
   const [result, setResult] = useState<EnhanceResult | null>(null);

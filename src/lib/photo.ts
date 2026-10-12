@@ -5,11 +5,23 @@
 // Ça marche bien sur un fond assez uniforme (drap, mur, sol) ; si l'article a la
 // même couleur que le fond, on se rabat sur une simple correction de lumière.
 
-export type BgStyle = "original" | "blanc" | "lin" | "beton" | "noir" | "bois";
+export type BgStyle =
+  | "original"
+  | "moquette"
+  | "tapis"
+  | "blanc"
+  | "lin"
+  | "beton"
+  | "noir"
+  | "bois";
+
+export const DEFAULT_BG: BgStyle = "moquette";
 
 export const BG_STYLES: { value: BgStyle; label: string }[] = [
-  { value: "original", label: "Original" },
+  { value: "moquette", label: "Moquette" },
+  { value: "tapis", label: "Tapis vintage" },
   { value: "blanc", label: "Studio blanc" },
+  { value: "original", label: "Original" },
   { value: "lin", label: "Lin beige" },
   { value: "beton", label: "Béton" },
   { value: "noir", label: "Studio noir" },
@@ -25,18 +37,34 @@ export interface EnhanceOptions {
 // Détourage par IA (modèle ONNX hébergé avec l'appli, exécuté sur le téléphone).
 // Résultat mis en cache par photo : changer de fond ne relance pas le calcul.
 const aiCache = new Map<string, Promise<HTMLImageElement | null>>();
+// Dernière erreur du détourage IA, affichée à l'utilisateur pour savoir quoi corriger.
+let lastAiError: string | null = null;
+// Le modèle travaille en 1024 px : inutile (et risqué en mémoire sur iPhone) de lui donner plus.
+const AI_INPUT_SIDE = 1024;
 
 function aiCutout(src: string): Promise<HTMLImageElement | null> {
   let p = aiCache.get(src);
   if (!p) {
     p = (async () => {
       try {
+        const input = await downscale(src, AI_INPUT_SIDE, 0.92);
         const { removeBackground } = await import("@imgly/background-removal");
-        const blob = await removeBackground(src, {
-          publicPath: `${window.location.origin}/imgly/`,
-          model: "small",
-          output: { format: "image/png" },
-        });
+        const run = (proxyToWorker: boolean) =>
+          removeBackground(input, {
+            publicPath: `${window.location.origin}/imgly/`,
+            model: "small",
+            proxyToWorker,
+            output: { format: "image/png" },
+          });
+        let blob: Blob;
+        try {
+          blob = await run(true);
+        } catch (e) {
+          // Safari iOS refuse parfois le worker : on retente dans le fil principal.
+          console.warn("Détourage IA (worker) en échec, nouvel essai sans worker", e);
+          blob = await run(false);
+        }
+        lastAiError = null;
         const url = URL.createObjectURL(blob);
         try {
           return await loadImage(url);
@@ -46,6 +74,7 @@ function aiCutout(src: string): Promise<HTMLImageElement | null> {
         }
       } catch (e) {
         console.warn("Détourage IA indisponible", e);
+        lastAiError = e instanceof Error ? e.message : String(e);
         aiCache.delete(src);
         return null;
       }
@@ -423,6 +452,193 @@ function rng(seed: number) {
   };
 }
 
+/** Bruit doux : petite grille aléatoire agrandie (taches nuageuses). `stretch` > 1 étire en largeur. */
+function smoothNoise(
+  w: number,
+  h: number,
+  cells: number,
+  rand: () => number,
+  stretch = 1
+): Float32Array {
+  const gw = cells;
+  const gh = Math.max(2, Math.round((cells * h * stretch) / w));
+  const grid = makeCanvas(gw, gh);
+  const gd = grid.ctx.createImageData(gw, gh);
+  for (let i = 0; i < gd.data.length; i += 4) {
+    const v = Math.round(rand() * 255);
+    gd.data[i] = gd.data[i + 1] = gd.data[i + 2] = v;
+    gd.data[i + 3] = 255;
+  }
+  grid.ctx.putImageData(gd, 0, 0);
+  const big = makeCanvas(w, h);
+  big.ctx.imageSmoothingEnabled = true;
+  big.ctx.imageSmoothingQuality = "high";
+  big.ctx.drawImage(grid.canvas, 0, 0, w, h);
+  const bd = big.ctx.getImageData(0, 0, w, h).data;
+  const out = new Float32Array(w * h);
+  for (let i = 0; i < out.length; i++) out[i] = bd[i * 4] / 255;
+  return out;
+}
+
+const smoothstep = (a: number, b: number, x: number) => {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+};
+
+/** Moquette berbère beige/crème finement marbrée, comme sur les annonces "flat lay". */
+function paintMoquette(ctx: CanvasRenderingContext2D, w: number, h: number, rand: () => number) {
+  const n1 = smoothNoise(w, h, 70, rand, 0.55);
+  const n2 = smoothNoise(w, h, 170, rand, 0.5);
+  const n3 = smoothNoise(w, h, 380, rand, 0.6);
+  const img = ctx.createImageData(w, h);
+  const d = img.data;
+  const dark = [201, 191, 177];
+  const light = [236, 231, 222];
+  for (let i = 0; i < w * h; i++) {
+    const v = n1[i] * 0.4 + n2[i] * 0.4 + n3[i] * 0.2;
+    const t = smoothstep(0.4, 0.6, v);
+    const grain = (rand() - 0.5) * 18;
+    const k = i * 4;
+    d[k] = dark[0] + (light[0] - dark[0]) * t + grain;
+    d[k + 1] = dark[1] + (light[1] - dark[1]) * t + grain;
+    d[k + 2] = dark[2] + (light[2] - dark[2]) * t + grain * 0.9;
+    d[k + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  // Boucles de laine : petits points clairs/foncés.
+  for (let i = 0; i < 30000; i++) {
+    const isLight = rand() > 0.5;
+    ctx.fillStyle = isLight
+      ? `rgba(248,244,236,${0.12 + rand() * 0.22})`
+      : `rgba(160,146,128,${0.08 + rand() * 0.14})`;
+    ctx.beginPath();
+    ctx.ellipse(rand() * w, rand() * h, 0.8 + rand() * 1.8, 0.6 + rand() * 1.2, rand() * Math.PI, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Légère lumière naturelle venant du haut.
+  const g = ctx.createLinearGradient(0, 0, w, h);
+  g.addColorStop(0, "rgba(255,255,255,0.06)");
+  g.addColorStop(1, "rgba(60,45,30,0.08)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
+}
+
+/**
+ * Tapis persan délavé, dessiné nœud par nœud (1 pixel = 1 nœud) puis agrandi :
+ * les losanges "en escalier" viennent naturellement de la grille, comme un vrai tissage.
+ */
+function paintTapis(ctx: CanvasRenderingContext2D, w: number, h: number, rand: () => number) {
+  const K = 5; // taille d'un nœud en pixels
+  const lw = Math.round(w / K);
+  const lh = Math.round(h / K);
+  type RGB = [number, number, number];
+  const P: Record<string, RGB> = {
+    field: [205, 140, 120],
+    rose: [222, 168, 146],
+    cream: [236, 222, 198],
+    sand: [222, 196, 160],
+    blue: [128, 160, 180],
+    navy: [82, 110, 132],
+    rust: [178, 96, 74],
+  };
+  const ringColors: RGB[] = [P.rust, P.cream, P.navy, P.sand, P.blue, P.cream, P.rose, P.navy, P.cream];
+
+  const small = makeCanvas(lw, lh);
+  const img = small.ctx.createImageData(lw, lh);
+  const d = img.data;
+  const cx = (lw - 1) / 2;
+  const cy = (lh - 1) / 2;
+  const medR = Math.min(lw, lh) * 0.36;
+  const B0 = 3; // bordure extérieure
+  const B1 = 5; // filet crème
+  const B2 = 19; // grande bordure
+  const B3 = 23; // galon
+  // "Abrash" : variations de teinte par rangée, typiques des tapis noués main.
+  const abrash = Array.from({ length: lh }, () => (rand() - 0.5) * 10);
+
+  for (let y = 0; y < lh; y++) {
+    for (let x = 0; x < lw; x++) {
+      const e = Math.min(x, y, lw - 1 - x, lh - 1 - y);
+      let c: RGB;
+      if (e < B0) c = P.navy;
+      else if (e < B1) c = P.cream;
+      else if (e < B2) {
+        // grande bordure : losanges répétés le long du bord
+        const along = e === y || e === lh - 1 - y ? x : y;
+        const across = e - B1;
+        const mid = (B2 - B1 - 1) / 2;
+        const dd = Math.abs((along % 16) - 8) + Math.abs(across - mid);
+        if (dd <= 1) c = P.rust;
+        else if (dd <= 3) c = P.cream;
+        else if (dd <= 5) c = P.navy;
+        else if (dd === 6) c = P.cream;
+        else c = (along + across) % 4 === 0 ? P.sand : P.rose;
+      } else if (e < B3) {
+        // galon à damier
+        c = e === B2 || e === B3 - 1 ? P.cream : (x + y) % 2 === 0 ? P.blue : P.cream;
+      } else {
+        // champ central
+        const md = Math.abs(x - cx) + Math.abs(y - cy) * 0.8;
+        const fx = Math.min(x - B3, lw - 1 - B3 - x);
+        const fy = Math.min(y - B3, lh - 1 - B3 - y);
+        const cd = fx + fy; // distance aux coins du champ
+        if (md < medR) {
+          c = ringColors[Math.floor(md / 3.2) % ringColors.length];
+        } else if (cd < medR * 0.75) {
+          c = ringColors[(Math.floor(cd / 3.2) + 2) % ringColors.length];
+        } else {
+          const gx = (x - B3) % 10;
+          const gy = (y - B3) % 10;
+          const sd = Math.abs(gx - 5) + Math.abs(gy - 5);
+          c = sd <= 1 ? P.navy : sd === 2 ? P.sand : P.field;
+        }
+      }
+      const k = (y * lw + x) * 4;
+      const j = (rand() - 0.5) * 14 + abrash[y];
+      d[k] = c[0] + j;
+      d[k + 1] = c[1] + j;
+      d[k + 2] = c[2] + j;
+      d[k + 3] = 255;
+    }
+  }
+  small.ctx.putImageData(img, 0, 0);
+
+  // Agrandissement doux = aspect laine
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(small.canvas, 0, 0, w, h);
+
+  // Délavage vintage (zones usées irrégulières) + grain de tissage
+  const wear = smoothNoise(w, h, 18, rand);
+  const wear2 = smoothNoise(w, h, 60, rand);
+  const out = ctx.getImageData(0, 0, w, h);
+  const o = out.data;
+  for (let i = 0; i < w * h; i++) {
+    const k = i * 4;
+    const fade = 0.18 + smoothstep(0.5, 0.85, wear[i] * 0.7 + wear2[i] * 0.3) * 0.3;
+    const x = i % w;
+    const y = (i - x) / w;
+    const weave = (x % K === 0 ? -7 : 0) + (y % K === 0 ? -5 : 0) + (rand() - 0.5) * 20;
+    o[k] = o[k] + (238 - o[k]) * fade + weave;
+    o[k + 1] = o[k + 1] + (226 - o[k + 1]) * fade + weave;
+    o[k + 2] = o[k + 2] + (210 - o[k + 2]) * fade + weave;
+  }
+  ctx.putImageData(out, 0, 0);
+}
+
+// Les fonds texturés coûtent quelques centaines de ms : on les peint une seule fois.
+const bgCache = new Map<BgStyle, HTMLCanvasElement>();
+function getBackground(style: Exclude<BgStyle, "original">): HTMLCanvasElement {
+  let c = bgCache.get(style);
+  if (!c) {
+    const b = makeCanvas(OUT_W, OUT_H);
+    paintBackground(b.ctx, OUT_W, OUT_H, style);
+    c = b.canvas;
+    bgCache.set(style, c);
+  }
+  return c;
+}
+
 function paintBackground(
   ctx: CanvasRenderingContext2D,
   w: number,
@@ -431,6 +647,12 @@ function paintBackground(
 ) {
   const rand = rng(42);
   switch (style) {
+    case "moquette":
+      paintMoquette(ctx, w, h, rand);
+      break;
+    case "tapis":
+      paintTapis(ctx, w, h, rand);
+      break;
     case "blanc": {
       const g = ctx.createRadialGradient(w / 2, h * 0.45, h * 0.1, w / 2, h * 0.5, h * 0.85);
       g.addColorStop(0, "#ffffff");
@@ -550,7 +772,9 @@ export async function enhance(
     return {
       dataUrl: base.canvas.toDataURL("image/jpeg", 0.88),
       isolated: false,
-      note: "Le fond est trop proche de l'article pour l'isoler : seule la lumière a été corrigée. Essaie sur un drap ou un mur uni de couleur différente.",
+      note: lastAiError
+        ? `L'IA de détourage n'a pas pu tourner sur ce téléphone, et le fond de ta photo est trop chargé pour s'en passer : seule la lumière a été corrigée. Réessaie (connexion Wi-Fi, appli fermée puis rouverte) ou pose l'article sur un drap uni. Détail : ${lastAiError.slice(0, 160)}`
+        : "Le fond est trop proche de l'article pour l'isoler : seule la lumière a été corrigée. Essaie sur un drap ou un mur uni de couleur différente.",
     };
   }
 
@@ -590,18 +814,22 @@ export async function enhance(
   cut.ctx.drawImage(maskCanvas, 0, 0, W, H);
 
   const out = makeCanvas(OUT_W, OUT_H);
-  paintBackground(out.ctx, OUT_W, OUT_H, opts.bg);
+  out.ctx.drawImage(getBackground(opts.bg), 0, 0);
 
-  const fit = Math.min((OUT_W * 0.84) / bw, (OUT_H * 0.84) / bh);
+  // "Flat lay" : l'article posé à plat remplit l'image, avec une ombre courte au contact.
+  const flatLay = opts.bg === "moquette" || opts.bg === "tapis";
+  const fill = flatLay ? 0.92 : 0.84;
+  const fit = Math.min((OUT_W * fill) / bw, (OUT_H * fill) / bh);
   const dw = bw * fit;
   const dh = bh * fit;
   const dx = (OUT_W - dw) / 2;
-  const dy = (OUT_H - dh) / 2 - OUT_H * 0.015;
+  const dy = (OUT_H - dh) / 2 - (flatLay ? 0 : OUT_H * 0.015);
 
   out.ctx.save();
-  out.ctx.shadowColor = opts.bg === "noir" ? "rgba(0,0,0,0.65)" : "rgba(0,0,0,0.28)";
-  out.ctx.shadowBlur = 36;
-  out.ctx.shadowOffsetY = 16;
+  out.ctx.shadowColor =
+    opts.bg === "noir" ? "rgba(0,0,0,0.65)" : flatLay ? "rgba(40,28,15,0.32)" : "rgba(0,0,0,0.28)";
+  out.ctx.shadowBlur = flatLay ? 16 : 36;
+  out.ctx.shadowOffsetY = flatLay ? 6 : 16;
   out.ctx.imageSmoothingEnabled = true;
   out.ctx.imageSmoothingQuality = "high";
   out.ctx.drawImage(cut.canvas, bx0, by0, bw, bh, dx, dy, dw, dh);

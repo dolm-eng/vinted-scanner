@@ -383,6 +383,206 @@ function maskToCanvas(mask: Mask): HTMLCanvasElement {
 }
 
 // ---------------------------------------------------------------------------
+// Cadrage : objet principal, redressement, boîte englobante
+// ---------------------------------------------------------------------------
+
+/** Ne garde que l'article (plus grande zone) et les morceaux importants qui le touchent presque. */
+function keepMainObject(mask: Mask): Mask {
+  const { w, h, data } = mask;
+  const label = new Int32Array(w * h);
+  const queue = new Int32Array(w * h);
+  const comps: { size: number; x0: number; y0: number; x1: number; y1: number }[] = [
+    { size: 0, x0: 0, y0: 0, x1: 0, y1: 0 },
+  ];
+  for (let start = 0; start < data.length; start++) {
+    if (!data[start] || label[start]) continue;
+    const id = comps.length;
+    const c = { size: 0, x0: w, y0: h, x1: -1, y1: -1 };
+    let head = 0;
+    let tail = 0;
+    queue[tail++] = start;
+    label[start] = id;
+    while (head < tail) {
+      const idx = queue[head++];
+      const x = idx % w;
+      const y = (idx - x) / w;
+      c.size++;
+      if (x < c.x0) c.x0 = x;
+      if (x > c.x1) c.x1 = x;
+      if (y < c.y0) c.y0 = y;
+      if (y > c.y1) c.y1 = y;
+      // 8-connexité : les fines bretelles / lacets restent attachés
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx;
+          const yy = y + dy;
+          if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+          const n = yy * w + xx;
+          if (data[n] && !label[n]) {
+            label[n] = id;
+            queue[tail++] = n;
+          }
+        }
+      }
+    }
+    comps.push(c);
+  }
+  if (comps.length <= 2) return mask;
+  let main = 1;
+  for (let i = 2; i < comps.length; i++) if (comps[i].size > comps[main].size) main = i;
+  const M = comps[main];
+  const gap = Math.round(Math.max(w, h) * 0.04);
+  const keep = comps.map(
+    (c, i) =>
+      i === main ||
+      (i > 0 &&
+        c.size >= M.size * 0.12 &&
+        c.x1 >= M.x0 - gap &&
+        c.x0 <= M.x1 + gap &&
+        c.y1 >= M.y0 - gap &&
+        c.y0 <= M.y1 + gap)
+  );
+  const out = new Uint8Array(w * h);
+  let count = 0;
+  let x0 = w;
+  let y0 = h;
+  let x1 = -1;
+  let y1 = -1;
+  for (let i = 0; i < out.length; i++) {
+    if (!keep[label[i]]) continue;
+    out[i] = 1;
+    count++;
+    const x = i % w;
+    const y = (i - x) / w;
+    if (x < x0) x0 = x;
+    if (x > x1) x1 = x;
+    if (y < y0) y0 = y;
+    if (y > y1) y1 = y;
+  }
+  return { data: out, w, h, bbox: { x0, y0, x1, y1 }, fraction: count / (w * h) };
+}
+
+function dilate(mask: Mask, r: number): Mask {
+  const { w, h, data } = mask;
+  let cur = data;
+  for (let k = 0; k < r; k++) {
+    const next = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        next[i] =
+          cur[i] ||
+          (x > 0 && cur[i - 1]) ||
+          (x < w - 1 && cur[i + 1]) ||
+          (y > 0 && cur[i - w]) ||
+          (y < h - 1 && cur[i + w])
+            ? 1
+            : 0;
+      }
+    }
+    cur = next;
+  }
+  return { ...mask, data: cur };
+}
+
+/**
+ * Angle (radians) qui rend la silhouette symétrique gauche/droite : un vêtement posé
+ * à plat l'est presque toujours. Renvoie 0 si l'article n'est pas symétrique
+ * (chaussure de profil, sac…) ou déjà droit.
+ */
+function symmetryAngle(mask: Mask): number {
+  const { w, h, data } = mask;
+  let sx = 0;
+  let sy = 0;
+  let n = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (data[y * w + x]) {
+        sx += x;
+        sy += y;
+        n++;
+      }
+    }
+  }
+  if (n < 200) return 0;
+  const cx = sx / n;
+  const cy = sy / n;
+  const step = Math.max(1, Math.round(Math.sqrt(n / 6000)));
+  const score = (a: number) => {
+    const c = Math.cos(a);
+    const s = Math.sin(a);
+    let hit = 0;
+    let tot = 0;
+    for (let y = 0; y < h; y += step) {
+      for (let x = 0; x < w; x += step) {
+        if (!data[y * w + x]) continue;
+        const px = x - cx;
+        const py = y - cy;
+        // position une fois redressé, puis miroir, puis retour dans l'image d'origine
+        const qx = -(px * c - py * s);
+        const qy = px * s + py * c;
+        const mx = Math.round(cx + qx * c + qy * s);
+        const my = Math.round(cy - qx * s + qy * c);
+        tot++;
+        if (mx >= 0 && my >= 0 && mx < w && my < h && data[my * w + mx]) hit++;
+      }
+    }
+    return tot ? hit / tot : 0;
+  };
+  const deg = Math.PI / 180;
+  const s0 = score(0);
+  let best = 0;
+  let bestScore = s0;
+  for (let a = -20; a <= 20; a += 1) {
+    const sc = score(a * deg);
+    if (sc > bestScore) {
+      bestScore = sc;
+      best = a;
+    }
+  }
+  for (let a = best - 0.75; a <= best + 0.75; a += 0.25) {
+    const sc = score(a * deg);
+    if (sc > bestScore) {
+      bestScore = sc;
+      best = a;
+    }
+  }
+  // On ne tourne que si la silhouette devient franchement symétrique.
+  if (Math.abs(best) < 1.5 || bestScore < 0.86 || bestScore - s0 < 0.025) return 0;
+  return best * deg;
+}
+
+/** Boîte englobante des pixels opaques d'un canevas (analyse en basse résolution). */
+function alphaBBox(canvas: HTMLCanvasElement): { x: number; y: number; w: number; h: number } | null {
+  const scale = Math.min(1, 500 / Math.max(canvas.width, canvas.height));
+  const sw = Math.max(1, Math.round(canvas.width * scale));
+  const sh = Math.max(1, Math.round(canvas.height * scale));
+  const small = makeCanvas(sw, sh);
+  small.ctx.drawImage(canvas, 0, 0, sw, sh);
+  const d = small.ctx.getImageData(0, 0, sw, sh).data;
+  let x0 = sw;
+  let y0 = sh;
+  let x1 = -1;
+  let y1 = -1;
+  for (let y = 0; y < sh; y++) {
+    for (let x = 0; x < sw; x++) {
+      if (d[(y * sw + x) * 4 + 3] > 96) {
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+    }
+  }
+  if (x1 < 0) return null;
+  const X0 = Math.max(0, Math.floor((x0 - 1) / scale));
+  const Y0 = Math.max(0, Math.floor((y0 - 1) / scale));
+  const X1 = Math.min(canvas.width, Math.ceil((x1 + 2) / scale));
+  const Y1 = Math.min(canvas.height, Math.ceil((y1 + 2) / scale));
+  return { x: X0, y: Y0, w: X1 - X0, h: Y1 - Y0 };
+}
+
+// ---------------------------------------------------------------------------
 // Lumière
 // ---------------------------------------------------------------------------
 
@@ -884,10 +1084,20 @@ export async function enhance(
     const cutout = await aiCutout(src);
     const ai = cutout ? maskFromCutout(cutout, W, H, sw, sh) : null;
     if (ai) {
-      mask = ai.mask;
+      mask = keepMainObject(ai.mask);
+      // On efface aussi du détourage IA les objets parasites écartés.
+      const clean = maskToCanvas(dilate(mask, 2));
+      const mc = ai.maskCanvas.getContext("2d");
+      if (mc) {
+        mc.globalCompositeOperation = "destination-in";
+        mc.imageSmoothingEnabled = true;
+        mc.drawImage(clean, 0, 0, ai.maskCanvas.width, ai.maskCanvas.height);
+        mc.globalCompositeOperation = "source-over";
+      }
       aiMaskCanvas = ai.maskCanvas;
     } else {
-      mask = computeMask(smallData, sw, sh);
+      const m = computeMask(smallData, sw, sh);
+      mask = m ? keepMainObject(m) : null;
     }
   }
 
@@ -943,15 +1153,32 @@ export async function enhance(
   cut.ctx.globalCompositeOperation = "source-over";
   if (opts.iron) ironGarment(cut.ctx, bx0, by0, bw, bh);
 
+  // Redressement automatique, puis cadrage serré sur l'article réellement détouré.
+  let piece = cut.canvas;
+  const angle = symmetryAngle(mask);
+  if (angle !== 0) {
+    const cxp = bx0 + bw / 2;
+    const cyp = by0 + bh / 2;
+    const diag = Math.ceil(Math.hypot(bw, bh)) + 4;
+    const rot = makeCanvas(diag, diag);
+    rot.ctx.imageSmoothingEnabled = true;
+    rot.ctx.imageSmoothingQuality = "high";
+    rot.ctx.translate(diag / 2, diag / 2);
+    rot.ctx.rotate(angle);
+    rot.ctx.drawImage(cut.canvas, -cxp, -cyp);
+    piece = rot.canvas;
+  }
+  const box = alphaBBox(piece) ?? { x: bx0, y: by0, w: bw, h: bh };
+
   const out = makeCanvas(OUT_W, OUT_H);
   out.ctx.drawImage(getBackground(opts.bg), 0, 0);
 
   // "Flat lay" : l'article posé à plat remplit l'image, avec une ombre courte au contact.
   const flatLay = opts.bg === "moquette" || opts.bg === "tapis";
   const fill = flatLay ? 0.92 : 0.84;
-  const fit = Math.min((OUT_W * fill) / bw, (OUT_H * fill) / bh);
-  const dw = bw * fit;
-  const dh = bh * fit;
+  const fit = Math.min((OUT_W * fill) / box.w, (OUT_H * fill) / box.h);
+  const dw = box.w * fit;
+  const dh = box.h * fit;
   const dx = (OUT_W - dw) / 2;
   const dy = (OUT_H - dh) / 2 - (flatLay ? 0 : OUT_H * 0.015);
 
@@ -962,7 +1189,7 @@ export async function enhance(
   out.ctx.shadowOffsetY = flatLay ? 6 : 16;
   out.ctx.imageSmoothingEnabled = true;
   out.ctx.imageSmoothingQuality = "high";
-  out.ctx.drawImage(cut.canvas, bx0, by0, bw, bh, dx, dy, dw, dh);
+  out.ctx.drawImage(piece, box.x, box.y, box.w, box.h, dx, dy, dw, dh);
   out.ctx.restore();
 
   return { dataUrl: out.canvas.toDataURL("image/jpeg", 0.9), isolated: true };

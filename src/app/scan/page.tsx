@@ -8,7 +8,7 @@ import { Field, SelectInput } from "@/components/ui";
 import { db, newId, type Condition } from "@/lib/db";
 import { eur, todayISO } from "@/lib/dates";
 import { generateDescription, generateTitle } from "@/lib/listing";
-import { CATEGORIES, CONDITIONS, estimatePrice } from "@/lib/priceGuide";
+import { CATEGORIES, CONDITIONS, estimatePrice, vintedSearchUrl } from "@/lib/priceGuide";
 import { PLATFORMS } from "@/lib/status";
 
 type Step = "photo" | "details";
@@ -22,7 +22,8 @@ export default function ScanPage() {
   const [photos, setPhotos] = useState<string[]>([]);
   const [studioIndex, setStudioIndex] = useState<number | null>(null);
 
-  const [category, setCategory] = useState<string>(CATEGORIES[0]);
+  const [category, setCategory] = useState<string>("");
+  const [vintage, setVintage] = useState(false);
   const [brand, setBrand] = useState("");
   const [size, setSize] = useState("");
   const [condition, setCondition] = useState<Condition>("tres_bon");
@@ -33,8 +34,8 @@ export default function ScanPage() {
   const [saving, setSaving] = useState(false);
 
   const estimate = useMemo(
-    () => estimatePrice(category, brand, condition),
-    [category, brand, condition]
+    () => estimatePrice(category, brand, condition, vintage),
+    [category, brand, condition, vintage]
   );
 
   const purchase = Number(purchasePrice.replace(",", ".")) || 0;
@@ -56,11 +57,13 @@ export default function ScanPage() {
     setPurchasePrice("");
     setSku("");
     setCondition("tres_bon");
+    setCategory("");
+    setVintage(false);
     setStep("photo");
   }
 
   async function save(next: boolean) {
-    if (photos.length === 0) return;
+    if (photos.length === 0 || !category) return;
     setSaving(true);
     const now = Date.now();
     const id = newId();
@@ -167,7 +170,14 @@ export default function ScanPage() {
 
       <div className="mt-5 flex flex-col gap-4">
         <Field label="Catégorie">
-          <SelectInput value={category} onChange={setCategory} options={CATEGORIES} />
+          <SelectInput
+            value={category}
+            onChange={setCategory}
+            options={[
+              ...(category ? [] : [{ value: "", label: "Choisis le type d'article…" }]),
+              ...CATEGORIES.map((c) => ({ value: c, label: c })),
+            ]}
+          />
         </Field>
 
         <Field label="Marque">
@@ -177,6 +187,13 @@ export default function ScanPage() {
             placeholder="Ex. Nike, Zara, sans marque…"
             className={INPUT}
           />
+          {brand.trim() && (
+            <p className={`mt-1 text-xs ${estimate.brandKey ? "text-sage" : "text-brass-dim"}`}>
+              {estimate.brandKey
+                ? `Marque reconnue : prix ×${estimate.brandMult.toFixed(1).replace(".", ",")} par rapport à une marque standard`
+                : "Marque pas encore dans la grille : estimée comme une marque standard. Vérifie sur Vinted."}
+            </p>
+          )}
         </Field>
 
         <div className="grid grid-cols-2 gap-3">
@@ -202,6 +219,21 @@ export default function ScanPage() {
           </Field>
         </div>
 
+        <button
+          type="button"
+          role="switch"
+          aria-checked={vintage}
+          onClick={() => setVintage(!vintage)}
+          className={`rounded-sm border px-3 py-2.5 text-left text-sm ${
+            vintage ? "border-ink bg-ink text-paper" : "border-line text-ink/70"
+          }`}
+        >
+          {vintage ? "✓ " : ""}Vintage / Y2K / pièce recherchée
+          <span className={`block text-xs ${vintage ? "text-paper/70" : "text-ink/50"}`}>
+            Années 90-2000, gros logo, maillot d&apos;époque… (+35 %)
+          </span>
+        </button>
+
         <Field label="État">
           <div className="grid grid-cols-2 gap-2">
             {CONDITIONS.map((c) => (
@@ -224,9 +256,11 @@ export default function ScanPage() {
         <div className="ticket-notch rounded-sm border border-line bg-paper-dim/60 px-4 py-4">
           <p className="text-xs text-ink/60">Estimation de revente</p>
           <p className="font-display text-3xl font-bold tabular-nums">
-            {estimate.low}–{estimate.high} €
+            {category ? `${estimate.low}–${estimate.high} €` : "—"}
           </p>
-          {verdict ? (
+          {!category ? (
+            <p className="mt-1.5 text-sm text-ink/70">Choisis le type d&apos;article pour estimer le prix.</p>
+          ) : verdict ? (
             <p className={`mt-1.5 text-sm font-semibold ${verdict.tone}`}>
               {verdict.label} · x{verdict.mult.toFixed(1)} · gain estimé{" "}
               {eur(mid - purchase)}
@@ -237,9 +271,19 @@ export default function ScanPage() {
             </p>
           )}
           <p className="mt-1 text-xs text-ink/50">
-            Grille locale par catégorie, marque et état. Compare avec les annonces
-            Vinted similaires et affine avec tes ventes.
+            Calculé à partir du type, de la marque, de l&apos;état et du style (la photo
+            n&apos;est pas analysée). Vérifie toujours les vrais prix :
           </p>
+          {category && (
+            <a
+              href={vintedSearchUrl(category, brand, size)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2 inline-block text-sm font-medium text-chalk-red underline"
+            >
+              Voir les annonces similaires sur Vinted →
+            </a>
+          )}
         </div>
 
         <details className="rounded-sm border border-line px-3 py-2.5">
@@ -272,7 +316,7 @@ export default function ScanPage() {
         <button
           type="button"
           onClick={() => save(false)}
-          disabled={saving}
+          disabled={saving || !category}
           className="mt-1 rounded-sm bg-chalk-red py-3.5 font-display text-base font-bold text-paper disabled:opacity-60"
         >
           {saving ? "Enregistrement…" : "Ajouter au stock"}
@@ -280,7 +324,7 @@ export default function ScanPage() {
         <button
           type="button"
           onClick={() => save(true)}
-          disabled={saving}
+          disabled={saving || !category}
           className="rounded-sm border border-ink py-3 text-sm font-medium disabled:opacity-60"
         >
           Enregistrer et scanner le suivant

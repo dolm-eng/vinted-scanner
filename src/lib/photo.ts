@@ -32,6 +32,8 @@ export interface EnhanceOptions {
   bg: BgStyle;
   crop: boolean;
   levels: boolean;
+  /** Atténue les ombres des plis (rendu "repassé"). Optionnel pour rester compatible. */
+  iron?: boolean;
 }
 
 // Détourage par IA (modèle ONNX hébergé avec l'appli, exécuté sur le téléphone).
@@ -437,6 +439,132 @@ function applyLevels(
 }
 
 // ---------------------------------------------------------------------------
+// Défroissage
+// ---------------------------------------------------------------------------
+
+/** Flou boîte séparable (3 passes ≈ gaussien), en place. */
+function boxBlur(src: Float32Array, w: number, h: number, r: number): Float32Array {
+  if (r < 1) return src;
+  let a: Float32Array = src;
+  const b: Float32Array = new Float32Array(w * h);
+  const win = 2 * r + 1;
+  for (let pass = 0; pass < 3; pass++) {
+    // horizontal a -> b
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      let acc = 0;
+      for (let x = -r; x <= r; x++) acc += a[row + Math.min(w - 1, Math.max(0, x))];
+      for (let x = 0; x < w; x++) {
+        b[row + x] = acc / win;
+        acc += a[row + Math.min(w - 1, x + r + 1)] - a[row + Math.max(0, x - r)];
+      }
+    }
+    // vertical b -> a
+    if (a === src) a = new Float32Array(w * h);
+    for (let x = 0; x < w; x++) {
+      let acc = 0;
+      for (let y = -r; y <= r; y++) acc += b[Math.min(h - 1, Math.max(0, y)) * w + x];
+      for (let y = 0; y < h; y++) {
+        a[y * w + x] = acc / win;
+        acc += b[Math.min(h - 1, y + r + 1) * w + x] - b[Math.max(0, y - r) * w + x];
+      }
+    }
+  }
+  return a;
+}
+
+/**
+ * "Repassage" numérique : les plis sont des ombres douces (la luminosité varie mais
+ * pas la couleur). On compare la luminosité locale à celle du tissu autour et on
+ * compense l'écart, sauf sur les imprimés, coutures et zones d'une autre couleur
+ * (contours nets ou teinte différente), qui restent intacts.
+ */
+function ironGarment(
+  ctx: CanvasRenderingContext2D,
+  x0: number,
+  y0: number,
+  w: number,
+  h: number
+) {
+  if (w < 16 || h < 16) return;
+  const img = ctx.getImageData(x0, y0, w, h);
+  const d = img.data;
+  const n = w * h;
+  const S = Math.max(w, h);
+  const L = new Float32Array(n);
+  const cb = new Float32Array(n);
+  const cr = new Float32Array(n);
+  const m = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const k = i * 4;
+    const r = d[k];
+    const g = d[k + 1];
+    const b = d[k + 2];
+    L[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+    cb[i] = b - L[i];
+    cr[i] = r - L[i];
+    m[i] = d[k + 3] > 200 ? 1 : 0;
+  }
+
+  // Flou normalisé : ignore le fond transparent (pas de halo sur les bords).
+  const nblur = (v: Float32Array, wgt: Float32Array, r: number) => {
+    const vw = new Float32Array(n);
+    for (let i = 0; i < n; i++) vw[i] = v[i] * wgt[i];
+    const num = boxBlur(vw, w, h, r);
+    const den = boxBlur(Float32Array.from(wgt), w, h, r);
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i++) out[i] = den[i] > 1e-3 ? num[i] / den[i] : v[i];
+    return out;
+  };
+
+  const EPS = 6;
+  const rFine = Math.max(1, Math.round(S * 0.002));
+  const rMid = Math.max(2, Math.round(S * 0.005));
+  const rLarge = Math.max(4, Math.round(S * 0.07));
+
+  // 1) Détails nets (imprimés, coutures, boutons) : contraste fort sur quelques pixels.
+  //    Un pli, lui, est une ombre progressive : il n'est presque pas détecté ici.
+  const fine = nblur(L, m, rFine);
+  const edge = new Float32Array(n);
+  for (let i = 0; i < n; i++) edge[i] = (m[i] * Math.abs(L[i] - fine[i])) / (fine[i] + 40);
+  const edgeDensity = boxBlur(edge, w, h, Math.max(2, Math.round(S * 0.006)));
+  const keep = new Float32Array(n); // tissu "neutre" servant de référence
+  for (let i = 0; i < n; i++) keep[i] = m[i] * (1 - smoothstep(0.06, 0.16, edgeDensity[i]));
+
+  // 2) Niveau local (rayures et grain lissés) vs. niveau du tissu autour (imprimés exclus).
+  const Ls = nblur(L, m, rMid);
+  const Lb = nblur(L, keep, rLarge);
+  const cbS = nblur(cb, m, rMid);
+  const crS = nblur(cr, m, rMid);
+  const cbB = nblur(cb, keep, rLarge);
+  const crB = nblur(cr, keep, rLarge);
+
+  // 3) Champ de correction (log), lissé pour ne jamais créer de contour.
+  const strength = 0.88;
+  const corr = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    if (!m[i]) continue;
+    const lr = Math.log((Ls[i] + EPS) / (Lb[i] + EPS));
+    // Écart trop fort ou teinte différente = autre zone du vêtement, pas un pli.
+    const plausible = 1 - smoothstep(0.42, 0.62, Math.abs(lr));
+    const dc = Math.hypot(cbS[i] - cbB[i], crS[i] - crB[i]);
+    const sameColor = 1 - smoothstep(9, 20, dc);
+    const nearPrint = smoothstep(0.08, 0.2, edgeDensity[i]);
+    corr[i] = -lr * strength * plausible * sameColor * (1 - 0.85 * nearPrint);
+  }
+  const field = nblur(corr, m, Math.max(1, Math.round(S * 0.003)));
+  for (let i = 0; i < n; i++) {
+    if (!m[i]) continue;
+    const f = Math.exp(Math.max(-0.5, Math.min(0.5, field[i])));
+    const k = i * 4;
+    d[k] = Math.min(255, d[k] * f);
+    d[k + 1] = Math.min(255, d[k + 1] * f);
+    d[k + 2] = Math.min(255, d[k + 2] * f);
+  }
+  ctx.putImageData(img, x0, y0);
+}
+
+// ---------------------------------------------------------------------------
 // Fonds
 // ---------------------------------------------------------------------------
 
@@ -812,6 +940,8 @@ export async function enhance(
   cut.ctx.imageSmoothingEnabled = true;
   cut.ctx.imageSmoothingQuality = "high";
   cut.ctx.drawImage(maskCanvas, 0, 0, W, H);
+  cut.ctx.globalCompositeOperation = "source-over";
+  if (opts.iron) ironGarment(cut.ctx, bx0, by0, bw, bh);
 
   const out = makeCanvas(OUT_W, OUT_H);
   out.ctx.drawImage(getBackground(opts.bg), 0, 0);

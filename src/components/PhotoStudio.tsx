@@ -18,6 +18,7 @@ export default function PhotoStudio({
   const [bg, setBg] = useState<BgStyle>(DEFAULT_BG);
   const [crop, setCrop] = useState(true);
   const [levels, setLevels] = useState(true);
+  const [iron, setIron] = useState(true);
   const [result, setResult] = useState<EnhanceResult | null>(null);
   const [busy, setBusy] = useState(true);
   const [showOriginal, setShowOriginal] = useState(false);
@@ -29,7 +30,7 @@ export default function PhotoStudio({
     setBusy(true);
     setFailed(false);
     const timer = setTimeout(() => {
-      enhance(src, { bg, crop, levels })
+      enhance(src, { bg, crop, levels, iron })
         .then((r) => {
           if (id === run.current) {
             setResult(r);
@@ -44,7 +45,7 @@ export default function PhotoStudio({
         });
     }, 60);
     return () => clearTimeout(timer);
-  }, [src, bg, crop, levels]);
+  }, [src, bg, crop, levels, iron]);
 
   const shown = showOriginal || !result ? src : result.dataUrl;
 
@@ -105,6 +106,9 @@ export default function PhotoStudio({
 
         <div className="mt-4 flex flex-col gap-2.5 text-sm">
           <Toggle label="Corriger la lumière et les couleurs" on={levels} onChange={setLevels} />
+          {bg !== "original" && (
+            <Toggle label="Repasser (atténuer les plis)" on={iron} onChange={setIron} />
+          )}
           {bg === "original" && (
             <Toggle label="Recadrer autour de l'article" on={crop} onChange={setCrop} />
           )}
